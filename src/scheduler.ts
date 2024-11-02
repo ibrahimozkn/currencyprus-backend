@@ -9,7 +9,7 @@ export async function scheduleScraping() {
     await scraper.init();
   } catch (error) {
     console.error('Error initializing scraper:', error);
-    process.exit(1); // Exit if the initialization fails
+    process.exit(1);
   }
 
   cron.schedule('* * * * *', async () => {

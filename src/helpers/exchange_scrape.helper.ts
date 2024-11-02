@@ -3,185 +3,143 @@ import { PrismaClient } from '@prisma/client';
 import { ExchangeType } from '@/interfaces/exchange.interface';
 import axios from 'axios';
 import https from 'https';
+import { scrapeLimasolBank } from '@/scrapers/limasolbank.scraper';
+import { scrapeGalipDoviz } from '@/scrapers/galipdoviz.scraper';
+import { scrapeSunDoviz } from '@/scrapers/sundoviz.scraper';
+import { cleanWebsiteString } from './cleanWebsiteString';
+import { scrapeIktisatBank } from '@/scrapers/iktisatbank.scraper';
+
+export type RateData = Record<string, { buy?: string; sell?: string }>;
 
 export class ExchangeScraper {
   private browser: Browser | null = null;
   private page: Page | null = null;
   private prisma = new PrismaClient();
-  private httpsAgent = new https.Agent({ rejectUnauthorized: false }); // Custom HTTPS agent
+  private httpsAgent = new https.Agent({ rejectUnauthorized: false });
+  private readonly maxRetries = 4;
+  private readonly retryTimeout = 90000;
+
+  private delay(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
 
   async init() {
     try {
-      this.browser = await chromium.launch({
-        headless: true,
-        args: ['--ignore-certificate-errors'], // Bypass SSL errors in Playwright
-      });
+      this.browser = await chromium.launch({ headless: true, args: ['--ignore-certificate-errors'] });
       this.page = await this.browser.newPage();
       console.log('Browser initialized successfully.');
     } catch (error) {
       console.error('Error initializing browser:', error);
-      process.exit(1); // Exit if initialization fails
+      throw new Error('Browser initialization failed.');
     }
   }
 
   async scrapeAllExchanges() {
     try {
       const exchanges = await this.prisma.exchange.findMany();
-      console.log(`Found ${exchanges.length} exchanges to scrape.`);
-
-      for (const exchange of exchanges) {
-        try {
-          console.log(`Starting to scrape exchange with ID ${exchange.id}`);
-          await this.scrapeAndStore(exchange.id);
-        } catch (error) {
-          console.error(`Failed to scrape exchange with ID ${exchange.id}:`, error);
-        }
-      }
+      const scrapeTasks = exchanges.map(exchange => this.scrapeExchangeSafely(exchange.id));
+      await Promise.allSettled(scrapeTasks);
     } catch (error) {
       console.error('Error fetching exchanges:', error);
     }
   }
 
-  async scrapeAndStore(exchangeId: number) {
-    if (!this.page) {
-      throw new Error('Scraper not initialized. Call init() first.');
-    }
-
+  private async scrapeExchangeSafely(exchangeId: number) {
     try {
-      const exchange = await this.prisma.exchange.findUnique({
-        where: { id: exchangeId },
-      });
-
-      if (!exchange) {
-        throw new Error(`Exchange with ID ${exchangeId} not found`);
-      }
-
-      const isAccessible = await this.isUrlAccessible(exchange.website);
-      if (!isAccessible) {
-        throw new Error(`Exchange website ${exchange.website} is not accessible`);
-      }
-
-      await this.retryGoto(this.page, exchange.website);
-
-      const rates = await this.scrapeRates(exchange.website);
-
-      for (const [currency, data] of Object.entries(rates)) {
-        if (data.buy) {
-          await this.prisma.rate.create({
-            data: {
-              exchangeId: exchange.id,
-              currency,
-              rate: parseFloat(data.buy),
-              type: ExchangeType.BUY,
-              date: new Date(),
-            },
-          });
-        }
-
-        if (data.sell) {
-          await this.prisma.rate.create({
-            data: {
-              exchangeId: exchange.id,
-              currency,
-              rate: parseFloat(data.sell),
-              type: ExchangeType.SELL,
-              date: new Date(),
-            },
-          });
-        }
-      }
-
-      console.log(`Scraped rates successfully for exchange ID ${exchangeId}`);
-      return rates;
+      console.log(`Starting to scrape exchange with ID ${exchangeId}`);
+      await this.scrapeAndStore(exchangeId);
     } catch (error) {
-      console.error(`Error scraping exchange ${exchangeId}:`, error);
-      throw error;
+      console.error(`Failed to scrape exchange with ID ${exchangeId}:`, error);
     }
   }
 
-  private async scrapeRates(website: string): Promise<Record<string, { buy?: string; sell?: string }>> {
+  async scrapeAndStore(exchangeId: number) {
+    if (!this.page) throw new Error('Scraper not initialized. Call init() first.');
+
+    const exchange = await this.prisma.exchange.findUnique({ where: { id: exchangeId } });
+    if (!exchange) throw new Error(`Exchange with ID ${exchangeId} not found`);
+
+    if (!(await this.isUrlAccessible(exchange.exchangeSite))) {
+      console.warn(`Exchange website ${exchange.exchangeSite} is not accessible`);
+      return;
+    }
+
+    await this.retryGoto(exchange.exchangeSite);
+    const rates = await this.scrapeRates(exchange.exchangeSite);
+    await this.storeRates(exchange.id, rates);
+    console.log(`Scraped rates successfully for exchange ID ${exchangeId}`);
+  }
+
+  private async storeRates(exchangeId: number, rates: RateData) {
+    const storeTasks = Object.entries(rates).map(async ([currency, data]) => {
+      if (data.buy) await this.storeRate(exchangeId, currency, data.buy, ExchangeType.BUY);
+      if (data.sell) await this.storeRate(exchangeId, currency, data.sell, ExchangeType.SELL);
+    });
+    await Promise.all(storeTasks);
+  }
+
+  private async storeRate(exchangeId: number, currency: string, rate: string, type: ExchangeType) {
+    console.log(`Storing rate for ${currency} ${type.toLowerCase()} at ${rate} for ${exchangeId}...`);
+    const parsedRate = parseFloat(rate);
+    if (isNaN(parsedRate)) return;
+
+    const recentRate = await this.prisma.rate.findFirst({
+      where: { exchangeId, currency, type },
+      orderBy: { date: 'desc' },
+    });
+
+    const isNewRate = !recentRate || recentRate.rate !== parsedRate || recentRate.date <= new Date(Date.now() - 3600000);
+    if (isNewRate) {
+      await this.prisma.rate.create({
+        data: {
+          exchangeId,
+          currency,
+          rate: parsedRate,
+          type,
+          date: new Date(),
+        },
+      });
+    } else {
+      console.log(`Skipping duplicate rate for ${currency} ${type.toLowerCase()} at ${rate} for ${exchangeId}`);
+    }
+  }
+
+  private async scrapeRates(website: string): Promise<RateData> {
     if (!this.page) throw new Error('Page not initialized');
 
-    const hostname = new URL(website).hostname;
+    const hostname = cleanWebsiteString(new URL(website).hostname);
     console.log(`Scraping rates for ${hostname}...`);
 
-    return await this.page.evaluate(hostname => {
-      const results: Record<string, { buy?: string; sell?: string }> = {};
-      const doc = document;
-
-      if (hostname === 'www.limasolbank.com.tr') {
-        const items = doc.querySelectorAll('.exchange-rates__item');
-
-        items.forEach(item => {
-          const currencyEl = item.querySelector('.exchange-rates__item__name');
-          const buyEl = item.querySelector('.exchange-rates__item__buy');
-          const sellEl = item.querySelector('.exchange-rates__item__sell');
-
-          if (currencyEl && buyEl && sellEl) {
-            const currencyText = currencyEl.textContent?.trim();
-            let currency: string | undefined;
-
-            if (currencyText?.includes('€')) {
-              currency = 'EUR';
-            } else if (currencyText?.includes('£')) {
-              currency = 'GBP';
-            } else if (currencyText?.includes('$')) {
-              currency = 'USD';
-            }
-
-            if (currency) {
-              results[currency] = {
-                buy: buyEl.textContent?.trim(),
-                sell: sellEl.textContent?.trim(),
-              };
-            }
-          }
-        });
-      } else if (hostname === 'galipdoviz.com') {
-        const rows = doc.querySelectorAll('table tr');
-
-        rows.forEach(row => {
-          const img = row.querySelector('img');
-          const buyEl = row.querySelectorAll('td')[1]?.querySelector('div');
-          const sellEl = row.querySelectorAll('td')[2]?.querySelector('div');
-
-          if (img && buyEl && sellEl) {
-            const altText = img.getAttribute('src')?.toLowerCase();
-            let currency: string | undefined;
-
-            if (altText?.includes('dolar')) {
-              currency = 'USD';
-            } else if (altText?.includes('euro')) {
-              currency = 'EUR';
-            } else if (altText?.includes('sterlin')) {
-              currency = 'GBP';
-            }
-
-            if (currency) {
-              results[currency] = {
-                buy: buyEl.textContent?.trim(),
-                sell: sellEl.textContent?.trim(),
-              };
-            }
-          }
-        });
-      }
-
-      return results;
-    }, hostname);
+    switch (hostname) {
+      case 'limasolbank.com.tr':
+        return await this.page.evaluate(scrapeLimasolBank);
+      case 'galipdoviz.com':
+        return await this.page.evaluate(scrapeGalipDoviz);
+      case 'sun.portburda.com':
+        return await this.page.evaluate(scrapeSunDoviz);
+      case 'iktisatbank.com':
+        return await this.page.evaluate(scrapeIktisatBank);
+      default:
+        throw new Error(`Scraping not implemented for ${hostname}`);
+    }
   }
 
-  private async retryGoto(page: Page, url: string, maxRetries = 3): Promise<void> {
-    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+  private async retryGoto(url: string): Promise<void> {
+    for (let attempt = 1; attempt <= this.maxRetries; attempt++) {
       try {
-        await page.goto(url, { waitUntil: 'networkidle', timeout: 60000 }); // Increased timeout to 60 seconds
+        await this.page!.goto(url, { waitUntil: 'networkidle', timeout: this.retryTimeout });
         console.log(`Successfully navigated to ${url} on attempt ${attempt}`);
         return;
       } catch (error) {
         console.log(`Attempt ${attempt} to navigate to ${url} failed. Retrying...`);
-        if (attempt === maxRetries) {
-          console.error(`Failed to navigate to ${url} after ${maxRetries} attempts`);
-          throw error;
+
+        if (attempt < this.maxRetries) {
+          console.log(`Waiting for ${this.retryTimeout / 4} milliseconds before retrying...`);
+          await this.delay(this.retryTimeout / 4);
+        }
+        if (attempt === this.maxRetries) {
+          console.error(`Failed to navigate to ${url} after ${this.maxRetries} attempts`);
+          throw new Error(`Navigation to ${url} failed after ${this.maxRetries} attempts`);
         }
       }
     }

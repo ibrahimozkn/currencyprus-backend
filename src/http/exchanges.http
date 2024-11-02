@@ -19,10 +19,10 @@ POST {{baseURL}}/exchanges
 Content-Type: application/json
 
 {
-    "name": "Galipoglu",
-    "location": "Example Location",
-    "website": "https://galipdoviz.com/",
-    "exchangeSite": "https://galipdoviz.com/"
+    "name": "Iktisat Bank",
+    "location": "Lefkosa",
+    "website": "https://www.iktisatbank.com/",
+    "exchangeSite": "https://www.iktisatbank.com/doviz-kurlari"
 }
 
 ###
