@@ -1,0 +1,42 @@
+# baseURL
+@baseURL = http://localhost:3000
+
+###
+# Find All Exchanges
+GET {{baseURL}}/exchanges
+
+###
+# Find Exchange By Id
+GET {{baseURL}}/exchanges/1
+
+###
+# Find Exchange By Name
+GET {{baseURL}}/exchanges/name/example-exchange
+
+###
+# Create Exchange
+POST {{baseURL}}/exchanges
+Content-Type: application/json
+
+{
+    "name": "Galipoglu",
+    "location": "Example Location",
+    "website": "https://galipdoviz.com/",
+    "exchangeSite": "https://galipdoviz.com/"
+}
+
+###
+# Update Exchange By Id
+PUT {{baseURL}}/exchanges/1
+Content-Type: application/json
+
+{
+    "name": "Updated Exchange",
+    "location": "Updated Location",
+    "website": "https://updated-example.com",
+    "exchangeSite": "Updated Branch"
+}
+
+###
+# Delete Exchange By Id
+DELETE {{baseURL}}/exchanges/1

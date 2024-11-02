@@ -1,0 +1,42 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model Exchange {
+  id Int @id @default(autoincrement())
+  name String @unique
+  location String
+  website String @unique
+  exchangeSite String
+
+  rates Rate[]
+}
+
+enum ExchangeType {
+  BUY
+  SELL
+}
+
+model Rate {
+  id Int @id @default(autoincrement())
+  exchange Exchange @relation(fields: [exchangeId], references: [id])
+  exchangeId Int
+  currency String
+  rate Float
+  type ExchangeType
+  date DateTime
+}
+
+model User {
+  id       Int    @id @default(autoincrement())
+  email    String @unique
+  password String
+}
